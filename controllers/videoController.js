@@ -86,46 +86,57 @@ export const uploadVideo = async (req, res) => {
 
   try {
     const { file } = req
+    const { title } = req.body
+
     if (!file) throw new Error("Please upload a file")
 
     const { originalname, path: inputFile, destination } = file
 
+    const videoTitle = title || originalname
+
     // Determine output file paths for each preset
     // We will dynamically create the outputs based on the preset name
     const outputFiles = {}
+
     presets.forEach((preset) => {
       outputFiles[preset.name] = path.join(destination, `${preset.name}.m3u8`)
     })
+
     const masterPlaylist = path.join(destination, "index.m3u8")
 
     // Use ffprobe to get original video resolution
-    ffmpeg.ffprobe(inputFile, (err, metadata) => {
-      if (err) {
-        throw new Error("Error retrieving video metadata: " + err.message)
-      }
-      // Find the video stream
-      const videoStream = metadata.streams.find((stream) => stream.codec_type === "video")
-      if (!videoStream) {
-        throw new Error("No video stream found")
-      }
-      const origWidth = videoStream.width
-      const origHeight = videoStream.height
+    const metadata = await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(inputFile, (err, metadata) => {
+        if (err) reject(new Error("Error retrieving video metadata: " + err.message))
+        else resolve(metadata)
+      })
+    })
 
-      // Filter out presets higher than the original file quality
-      const applicablePresets = presets.filter((preset) => origWidth >= preset.width && origHeight >= preset.height)
+    // Find the video stream
+    const videoStream = metadata.streams.find((stream) => stream.codec_type === "video")
 
-      if (applicablePresets.length === 0) {
-        throw new Error("Uploaded video quality is too low for processing")
-      }
+    if (!videoStream) throw new Error("No video stream found")
 
-      // Start building the ffmpeg command
+    const origWidth = videoStream.width
+    const origHeight = videoStream.height
+
+    // Filter out presets higher than the original file quality
+    const applicablePresets = presets.filter((preset) => origWidth >= preset.width && origHeight >= preset.height)
+
+    if (applicablePresets.length === 0) {
+      return res.status(400).json({ flag: 0, message: "Uploaded video quality is too low for processing" })
+    }
+
+    // Process video using ffmpeg (wrapped in Promise)
+    await new Promise((resolve, reject) => {
       let command = ffmpeg(inputFile)
 
-      // Dynamically add outputs based on each applicable preset
       applicablePresets.forEach((preset) => {
         command = command
           .output(outputFiles[preset.name])
           .outputOptions([
+            "-threads",
+            "4",
             "-vf",
             preset.scale,
             "-c:a",
@@ -154,55 +165,50 @@ export const uploadVideo = async (req, res) => {
       })
 
       command
-        .on("end", async () => {
-          // Build the master playlist dynamically
-          let masterContent = "#EXTM3U\n#EXT-X-VERSION:3\n"
-          applicablePresets.forEach((preset) => {
-            // Adjust bandwidth estimate if needed
-            let bandwidth
-            if (preset.name === "4k") bandwidth = 12000000
-            else if (preset.name === "2k") bandwidth = 7500000
-            else if (preset.name === "1080p") bandwidth = 5000000
-            else if (preset.name === "720p") bandwidth = 3000000
-            else if (preset.name === "480p") bandwidth = 1500000
-            masterContent += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${preset.width}x${preset.height}\n`
-            masterContent += `${preset.name}.m3u8\n`
-          })
-
-          fs.writeFileSync(masterPlaylist, masterContent)
-
-          const [results] = await promiseConnection.query(
-            "INSERT INTO tbl_videos (videoTitle, videoPath) VALUES (?, ?)",
-            [originalname, masterPlaylist]
-          )
-
-          if (results.affectedRows && results.insertId) {
-            // Remove the original input file after processing
-            fs.rm(inputFile, { force: true }, (error) => {
-              if (error) console.error("Error removing input file:", error.message)
-            })
-
-            return res.status(200).json({
-              message: "Video uploaded successfully",
-              videoPath: masterPlaylist,
-              results,
-            })
-          }
-        })
+        .on("end", resolve)
         .on("error", (error) => {
-          // Remove the destination directory if there is an error
-          fs.rmdir(destination, { recursive: true, force: true }, (err) => {
-            if (err) console.error("Error removing destination:", err.message)
-          })
-          try {
-            fs.unlinkSync(inputFile)
-          } catch (err) {
-            console.error("Error deleting input file:", err.message)
-          }
-          return res.status(500).json({ error: error.message })
+          reject(new Error("FFmpeg error: " + error.message))
         })
         .run()
     })
+
+    // Build the master playlist dynamically
+    let masterContent = "#EXTM3U\n#EXT-X-VERSION:3\n"
+    applicablePresets.forEach((preset) => {
+      let bandwidth =
+        {
+          "4k": 12000000,
+          "2k": 7500000,
+          "1080p": 5000000,
+          "720p": 3000000,
+          "480p": 1500000,
+        }[preset.name] || 1500000
+
+      masterContent += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${preset.width}x${preset.height}\n`
+      masterContent += `${preset.name}.m3u8\n`
+    })
+
+    fs.writeFileSync(masterPlaylist, masterContent)
+
+    // Insert into database **AFTER processing completes**
+    const [results] = await promiseConnection.query("INSERT INTO tbl_videos (videoTitle, videoPath) VALUES (?, ?)", [
+      videoTitle,
+      masterPlaylist,
+    ])
+
+    if (results.affectedRows && results.insertId) {
+      // Remove input file after processing
+      fs.rm(inputFile, { force: true }, (error) => {
+        if (error) console.error("Error removing input file:", error.message)
+      })
+
+      return res.status(200).json({
+        flag: 1,
+        message: "Video uploaded successfully",
+        videoPath: masterPlaylist,
+        results,
+      })
+    }
   } catch (error) {
     return res.status(500).json({ error: error.message })
   } finally {
