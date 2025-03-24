@@ -1,6 +1,7 @@
 import fs from "fs"
 import path from "path"
 import ffmpeg from "fluent-ffmpeg"
+
 import { pool } from "../utils/db.js"
 
 // Define all available presets
@@ -45,13 +46,32 @@ const presets = [
     bitrate: "1500k",
     scale: "scale=w=854:h=480",
   },
+  {
+    name: "360p",
+    width: 640,
+    height: 360,
+    crf: "28",
+    bitrate: "1000k",
+    scale: "scale=w=640:h=360",
+  },
+  {
+    name: "144p",
+    width: 256,
+    height: 144,
+    crf: "32",
+    bitrate: "300k",
+    scale: "scale=w=256:h=144",
+  },
 ]
 
 export const getAllVideos = async (req, res) => {
   const promiseConnection = await pool.promise().getConnection()
 
   try {
-    const [videos] = await promiseConnection.query("SELECT * FROM tbl_videos")
+    const [videos] = await promiseConnection.query("SELECT * FROM tbl_videos ORDER BY id DESC")
+
+    if (!videos.length) throw new Error("No videos found")
+
     res.status(200).json({ videos })
   } catch (error) {
     return res.status(500).json({ error: error.message })
@@ -182,6 +202,8 @@ export const uploadVideo = async (req, res) => {
           "1080p": 5000000,
           "720p": 3000000,
           "480p": 1500000,
+          "360p": 1000000,
+          "144p": 300000,
         }[preset.name] || 1500000
 
       masterContent += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${preset.width}x${preset.height}\n`
