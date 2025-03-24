@@ -119,7 +119,7 @@ export const uploadVideo = async (req, res) => {
     const outputFiles = {}
 
     presets.forEach((preset) => {
-      outputFiles[preset.name] = path.join(destination, `${preset.name}.m3u8`)
+      outputFiles[preset.name] = path.join(destination, `${preset.name}/index.m3u8`)
     })
 
     const masterPlaylist = path.join(destination, "index.m3u8")
@@ -146,6 +146,10 @@ export const uploadVideo = async (req, res) => {
     if (applicablePresets.length === 0) {
       return res.status(400).json({ flag: 0, message: "Uploaded video quality is too low for processing" })
     }
+
+    applicablePresets.map((preset) => {
+      fs.mkdirSync(path.join(destination, preset.name), { recursive: true })
+    })
 
     // Process video using ffmpeg (wrapped in Promise)
     await new Promise((resolve, reject) => {
@@ -207,7 +211,7 @@ export const uploadVideo = async (req, res) => {
         }[preset.name] || 1500000
 
       masterContent += `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${preset.width}x${preset.height}\n`
-      masterContent += `${preset.name}.m3u8\n`
+      masterContent += `${preset.name}/index.m3u8\n`
     })
 
     fs.writeFileSync(masterPlaylist, masterContent)
